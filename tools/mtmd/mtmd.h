@@ -478,6 +478,7 @@ enum mtmd_gen_audio_type {
     MTMD_GEN_AUDIO_TYPE_YUE2,
     MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3,
     MTMD_GEN_AUDIO_TYPE_FISH_S2,
+    MTMD_GEN_AUDIO_TYPE_MOSHI,
 };
 
 struct mtmd_gen_audio_info {
@@ -525,6 +526,7 @@ struct mtmd_gen_inp {
     // for MTMD_GEN_PROCESS_TYPE_GEN_WAV
     // pass either codes (discrete) or feats (continuous), depending on the pipeline
     // lfm3a GEN_CODE also takes codes: the codes revealed so far, -1 for a masked codebook
+    // moshi GEN_CODE: code0 is the sampled text token; with codes (all of the frame), only their backbone embedding is built
     // zonos3 GEN_WAV: -1 for a residual code not known yet, the frame is decoded without it
     int32_t * codes;
     size_t    n_codes;

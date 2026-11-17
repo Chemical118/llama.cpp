@@ -94,6 +94,7 @@ add_library(mtmd
             models/pockettts-seanet.cpp
             models/pockettts-spkenc.cpp
             models/pockettts-gen.cpp
+            models/moshi.cpp
             models/soprano.cpp
             models/step3vl.cpp
             models/siglip.cpp
