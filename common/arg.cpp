@@ -1721,6 +1721,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_CACHE_IDLE_SLOTS").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--decision-pad"}, "N",
+        string_format("decision models: pad the questions of a request to the same length when this takes fewer evaluations, "
+                      "one evaluation is worth N pad tokens (default: %d, -1 = disabled)", params.decision_pad),
+        [](common_params & params, int value) {
+            params.decision_pad = value;
+        }
+    ).set_env("LLAMA_ARG_DECISION_PAD").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
+        {"--decision-prefix-ckpt"}, "N",
+        string_format("decision models: also make a checkpoint where the state starts to differ from the previous one, so the next state is evaluated from there, "
+                      "if it is at least N tokens after the checkpoint in use (default: %d, -1 = disabled)", params.decision_prefix_ckpt),
+        [](common_params & params, int value) {
+            params.decision_prefix_ckpt = value;
+        }
+    ).set_env("LLAMA_ARG_DECISION_PREFIX_CKPT").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--context-shift"},
         {"--no-context-shift"},
         string_format("whether to use context shift on infinite text generation (default: %s)", params.ctx_shift ? "enabled" : "disabled"),

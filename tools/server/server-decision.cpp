@@ -1816,7 +1816,63 @@ json server_decision_context::format_answer(const server_decision_question & que
 // shared prompt prefix
 //
 
-std::vector<server_task> server_decision_group_tasks(std::vector<server_task> && tasks, size_t n_slots, size_t n_tokens_state) {
+// true if the outputs are the logits of the last prompt token, so tokens can be appended after it
+static bool decision_can_pad(const server_task & task) {
+    const auto & decision = task.decision;
+    return !decision.labels.empty() && decision.label_pos.empty() && decision.markers.empty() && decision.order.empty() &&
+           decision.group.empty() && decision.pointer < 0 && !decision.pooled && !decision.no_batching && !task.tokens.has_mtmd;
+}
+
+// pad the prompts to few distinct lengths: the tasks are split by length into buckets, each one is padded to its longest prompt
+// the buckets minimize n_cost * n_buckets + n_pad_tokens
+static void decision_pad_tasks(std::vector<server_task *> & tasks, size_t n_cost) {
+    for (const auto * task : tasks) {
+        if (!decision_can_pad(*task)) {
+            return;
+        }
+    }
+
+    std::stable_sort(tasks.begin(), tasks.end(), [](const server_task * a, const server_task * b) {
+        return a->tokens.size() < b->tokens.size();
+    });
+
+    // best[k]: lowest cost of the k shortest tasks, their last bucket starts at task from[k]
+    const size_t n = tasks.size();
+    std::vector<size_t> best(n + 1, 0);
+    std::vector<size_t> from(n + 1, 0);
+    for (size_t k = 1; k <= n; k++) {
+        const size_t n_tokens = tasks[k - 1]->tokens.size();
+        size_t n_pad = 0;
+        for (size_t j = k; j-- > 0;) {
+            n_pad += n_tokens - tasks[j]->tokens.size();
+            const size_t cost = best[j] + n_cost + n_pad;
+            if (j == k - 1 || cost < best[k]) {
+                best[k] = cost;
+                from[k] = j;
+            }
+        }
+    }
+
+    for (size_t k = n; k > 0; k = from[k]) {
+        const size_t n_tokens = tasks[k - 1]->tokens.size();
+        for (size_t j = from[k]; j < k; j++) {
+            server_task & task = *tasks[j];
+            const size_t n_prompt = task.tokens.size();
+            task.n_tokens_pad = n_tokens - n_prompt;
+            if (task.n_tokens_pad > 0) {
+                const size_t n_out = task.decision.label_groups.empty() ? task.decision.labels.size() : task.decision.label_groups.size();
+                task.decision.label_pos.assign(n_out, n_prompt - 1);
+                // any token, the outputs are before it
+                const llama_token token = task.tokens[n_prompt - 1];
+                for (size_t i = n_prompt; i < n_tokens; i++) {
+                    task.tokens.push_back(token);
+                }
+            }
+        }
+    }
+}
+
+std::vector<server_task> server_decision_group_tasks(std::vector<server_task> && tasks, size_t n_slots, size_t n_tokens_state, int32_t n_pad_cost) {
     n_slots = std::max(n_slots, (size_t) 1);
 
     std::vector<server_task> groups;
@@ -1834,6 +1890,10 @@ std::vector<server_task> server_decision_group_tasks(std::vector<server_task> &&
         if (end - i < 2 || n_shared == 0) {
             for (size_t j = i; j < end; j++) {
                 tasks[j].n_tokens_ckpt = std::min({n_tokens_state, tasks[j].tokens.size() - 1, (size_t) tasks[j].decision.pos_first()});
+                if (n_pad_cost >= 0) {
+                    std::vector<server_task *> group = {&tasks[j]};
+                    decision_pad_tasks(group, n_pad_cost);
+                }
                 groups.push_back(std::move(tasks[j]));
             }
             continue;
@@ -1841,6 +1901,13 @@ std::vector<server_task> server_decision_group_tasks(std::vector<server_task> &&
 
         parent.n_tokens_shared = n_shared;
         parent.n_tokens_ckpt   = std::min(n_tokens_state, n_shared);
+        if (n_pad_cost >= 0) {
+            std::vector<server_task *> group;
+            for (size_t j = i; j < end; j++) {
+                group.push_back(&tasks[j]);
+            }
+            decision_pad_tasks(group, n_pad_cost);
+        }
         for (size_t j = i + 1; j < end; j++) {
             tasks[j].id_parent = parent.id;
             parent.child_tasks.push_back(std::move(tasks[j]));

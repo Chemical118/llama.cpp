@@ -182,6 +182,8 @@ struct server_task {
     int32_t n_tokens_shared = 0;
     // decision: a checkpoint is made here, a later task with the same state starts from it
     int32_t n_tokens_ckpt = 0;
+    // decision: tokens appended after the prompt, the outputs are read before them, -1 if the task is not padded
+    int32_t n_tokens_pad = -1;
 
     // used by SERVER_TASK_TYPE_INFERENCE
     task_params   params;
@@ -258,6 +260,12 @@ struct server_task {
 
     int32_t n_tokens() const {
         return tokens.size();
+    }
+
+    // decision: first prompt position that is read, -1 if none
+    int32_t decision_pos_first() const {
+        const int32_t pos = decision.pos_first();
+        return pos < 0 && n_tokens_pad >= 0 ? n_tokens() - 1 - n_tokens_pad : pos;
     }
 
     bool need_embd() const {

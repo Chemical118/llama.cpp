@@ -25,6 +25,7 @@
 #include "base64.hpp"
 
 #include <algorithm>
+#include <numeric>
 #include <cstddef>
 #include <cinttypes>
 #include <deque>
@@ -266,6 +267,9 @@ struct server_batch {
 
 struct server_slot {
     int id;
+
+    // decision: a checkpoint is made here, where the state starts to differ from the previous one, -1 if none
+    int32_t n_tokens_ckpt_prefix = -1;
 
     llama_context * ctx_tgt = nullptr;
     llama_context * ctx_dft = nullptr;
@@ -2482,7 +2486,7 @@ private:
         auto res = std::make_unique<server_task_result_decision>();
         res->id       = slot.task->id;
         res->index    = slot.task->index;
-        res->n_tokens = slot.task->n_tokens();
+        res->n_tokens = slot.task->n_tokens() - std::max(slot.task->n_tokens_pad, 0);
 
         const auto & decision = slot.task->decision;
 
@@ -2618,6 +2622,36 @@ private:
             return false;
         }
         return true;
+    }
+
+    // padded decision: the sequences of a ubatch are consecutive and have the same number of tokens
+    // so the children take the free slots that follow the parent, the longest prompt first
+    // the slot of each child is returned, none if there are not enough free slots
+    std::vector<server_slot *> get_decision_pad_slots(const server_slot & parent_slot, const server_task & parent_task) {
+        const size_t n_children = parent_task.child_tasks.size();
+
+        std::vector<server_slot *> free_slots;
+        for (size_t i = 1; i < slots.size() && free_slots.size() < n_children; i++) {
+            server_slot & slot = slots[(parent_slot.id + i) % slots.size()];
+            if (!slot.is_processing()) {
+                free_slots.push_back(&slot);
+            }
+        }
+        if (free_slots.size() < n_children) {
+            return {};
+        }
+
+        std::vector<size_t> order(n_children);
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return parent_task.child_tasks[a].n_tokens() > parent_task.child_tasks[b].n_tokens();
+        });
+
+        std::vector<server_slot *> child_slots(n_children);
+        for (size_t i = 0; i < n_children; i++) {
+            child_slots[order[i]] = free_slots[i];
+        }
+        return child_slots;
     }
 
     std::vector<server_slot *> get_free_slots(size_t n_slots_needed, int exclude_id_slot) {
@@ -3028,7 +3062,7 @@ private:
                     if (task.is_parent()) {
                         // try getting free slots for all child tasks
                         size_t n_child_tasks = task.child_tasks.size();
-                        child_slots = get_free_slots(n_child_tasks, slot->id);
+                        child_slots = task.n_tokens_pad >= 0 ? get_decision_pad_slots(*slot, task) : get_free_slots(n_child_tasks, slot->id);
                         if (child_slots.size() < n_child_tasks) {
                             SRV_DBG("not enough free slots for child tasks, n_free = %zu, n_children = %zu, defer task, id_task = %d\n", child_slots.size(), n_child_tasks, id_task);
                             queue_tasks.defer(std::move(task));
@@ -4079,7 +4113,9 @@ private:
                             }
 
                             // the outputs of a decision are read from one batch
-                            const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision.pos_first() : -1;
+                            slot.n_tokens_ckpt_prefix = -1;
+
+                            const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision_pos_first() : -1;
                             if (n_decision_first >= 0 && slot.task->n_tokens() - n_decision_first > n_batch) {
                                 send_error(slot,
                                            string_format("the question and its options (%d tokens) are too large to process. "
@@ -4275,6 +4311,12 @@ private:
                                     }
                                 }
                             }
+
+                            // decision: the next state likely starts to differ at the same place as this one
+                            if (params_base.decision_prefix_ckpt >= 0 && slot.task->type == SERVER_TASK_TYPE_DECISION &&
+                                n_prefix < slot.task->n_tokens_ckpt && n_prefix - n_past >= std::max(params_base.decision_prefix_ckpt, 1)) {
+                                slot.n_tokens_ckpt_prefix = n_prefix;
+                            }
                         }
 
                         // [TAG_PROMPT_LOGITS]
@@ -4427,12 +4469,14 @@ private:
                     const auto & spans = slot.task->params.message_spans;
                     const auto last_user_pos = spans.last_user_message_pos();
 
-                    const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision.pos_first() : -1;
+                    const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision_pos_first() : -1;
 
                     // false if a task with the same state already made the checkpoint
                     bool need_decision_ckpt = do_checkpoint && is_decision_ckpt;
+                    bool need_prefix_ckpt   = do_checkpoint && is_decision_ckpt && slot.n_tokens_ckpt_prefix > 0;
                     for (const auto & ckpt : slot.prompt.checkpoints) {
                         need_decision_ckpt = need_decision_ckpt && ckpt->n_tokens != slot.task->n_tokens_ckpt;
+                        need_prefix_ckpt   = need_prefix_ckpt   && ckpt->n_tokens != slot.n_tokens_ckpt_prefix;
                     }
 
                     // add prompt tokens for processing in the current batch
@@ -4450,6 +4494,11 @@ private:
 
                         // stop at the end of the state, the checkpoint is made before the next batch
                         if (need_decision_ckpt && slot.prompt.n_tokens() == slot.task->n_tokens_ckpt && batch.size() > n_tokens_prev) {
+                            break;
+                        }
+
+                        // and where the state starts to differ from the previous one
+                        if (need_prefix_ckpt && slot.prompt.n_tokens() == slot.n_tokens_ckpt_prefix && batch.size() > n_tokens_prev) {
                             break;
                         }
 
@@ -4530,8 +4579,10 @@ private:
 
                         GGML_ASSERT(batch.size() > 0);
 
-                        // extract the logits only for the last token
-                        batch.set_output(batch.size() - 1, true);
+                        // extract the logits only for the last token, the outputs of a padded decision are before it
+                        if (slot.task->n_tokens_pad <= 0) {
+                            batch.set_output(batch.size() - 1, true);
+                        }
 
                         // and at the answer of each packed question
                         for (const int32_t pos : slot.task->decision.label_pos) {
@@ -4568,7 +4619,9 @@ private:
                             is_last_user_message || near_prompt_end ||
                             n_tokens_start > slot.prompt.checkpoints.back()->n_tokens + params_base.checkpoint_min_step);
                     if (is_decision_ckpt) {
-                        do_checkpoint = need_decision_ckpt && n_tokens_start == slot.task->n_tokens_ckpt && pos_min >= 0;
+                        do_checkpoint = pos_min >= 0 && (
+                                (need_decision_ckpt && n_tokens_start == slot.task->n_tokens_ckpt) ||
+                                (need_prefix_ckpt   && n_tokens_start == slot.n_tokens_ckpt_prefix));
                     }
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
@@ -6574,7 +6627,7 @@ void server_routes::init_routes() {
                     decision.fill_task(state, questions, other, 0, files, ctx_server.mctx, ctx_server.init_opt, probe);
                     n_tokens_state = tasks[0].tokens.get_common_prefix(probe.tokens);
                 }
-                tasks = server_decision_group_tasks(std::move(tasks), params.n_parallel, n_tokens_state);
+                tasks = server_decision_group_tasks(std::move(tasks), params.n_parallel, n_tokens_state, params.decision_pad);
             }
             rd.post_tasks(std::move(tasks));
         }

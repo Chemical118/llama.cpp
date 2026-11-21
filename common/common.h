@@ -658,6 +658,8 @@ struct common_params {
     int32_t n_cache_reuse       = 0;     // min chunk size to reuse from the cache via KV shifting
     bool    cache_prompt        = true;  // whether to enable prompt caching
     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
+    int32_t decision_pad        = -1;    // decision: tokens that one evaluation is worth when padding the questions of a request, -1 = no padding
+    int32_t decision_prefix_ckpt = -1;   // decision: min tokens between the checkpoint where the state starts to differ and the previous one, -1 = no such checkpoint
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints
