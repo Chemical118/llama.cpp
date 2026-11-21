@@ -1816,7 +1816,7 @@ json server_decision_context::format_answer(const server_decision_question & que
 // shared prompt prefix
 //
 
-std::vector<server_task> server_decision_group_tasks(std::vector<server_task> && tasks, size_t n_slots) {
+std::vector<server_task> server_decision_group_tasks(std::vector<server_task> && tasks, size_t n_slots, size_t n_tokens_state) {
     n_slots = std::max(n_slots, (size_t) 1);
 
     std::vector<server_task> groups;
@@ -1833,12 +1833,14 @@ std::vector<server_task> server_decision_group_tasks(std::vector<server_task> &&
 
         if (end - i < 2 || n_shared == 0) {
             for (size_t j = i; j < end; j++) {
+                tasks[j].n_tokens_ckpt = std::min({n_tokens_state, tasks[j].tokens.size() - 1, (size_t) tasks[j].decision.pos_first()});
                 groups.push_back(std::move(tasks[j]));
             }
             continue;
         }
 
         parent.n_tokens_shared = n_shared;
+        parent.n_tokens_ckpt   = std::min(n_tokens_state, n_shared);
         for (size_t j = i + 1; j < end; j++) {
             tasks[j].id_parent = parent.id;
             parent.child_tasks.push_back(std::move(tasks[j]));

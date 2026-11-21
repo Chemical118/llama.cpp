@@ -203,8 +203,9 @@ private:
 
 // group the tasks so that the common prefix of their prompts is evaluated only once
 // each group is one parent and its children, it takes at most n_slots slots
+// n_tokens_state: the prompts of all the questions about one state start with these tokens, 0 if not known
 // note: the order of the tasks is preserved
-std::vector<server_task> server_decision_group_tasks(std::vector<server_task> && tasks, size_t n_slots);
+std::vector<server_task> server_decision_group_tasks(std::vector<server_task> && tasks, size_t n_slots, size_t n_tokens_state = 0);
 
 // write "<|name|>" with U+00A6 in place of "|", so text from the request is not parsed as special tokens
 std::string server_decision_escape_special_tokens(const std::string & text);

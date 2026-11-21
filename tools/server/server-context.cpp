@@ -1825,6 +1825,20 @@ private:
         return nullptr;
     }
 
+    // true if a busy slot makes the checkpoint that this task can start from, and the selected slot does not have it
+    bool is_decision_state_busy(const server_slot & slot_selected, const server_task & task) const {
+        for (const server_slot & other : slots) {
+            if (!other.is_processing() || !other.task || other.task->n_tokens_ckpt <= 0) {
+                continue;
+            }
+            const size_t n_ckpt = other.task->n_tokens_ckpt;
+            if (other.task->tokens.get_common_prefix(task.tokens) >= n_ckpt && slot_selected.prompt.tokens.get_common_prefix(task.tokens) < n_ckpt) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::vector<server_slot_info> get_slot_infos() const {
         std::vector<server_slot_info> res;
         for (const server_slot & slot : slots) {
@@ -3000,6 +3014,12 @@ private:
                     if (slot->is_processing()) {
                         // if requested slot is unavailable, we defer this task for processing later
                         SRV_DBG("requested slot is unavailable, defer task, id_task = %d\n", id_task);
+                        queue_tasks.defer(std::move(task));
+                        break;
+                    }
+
+                    if (task.type == SERVER_TASK_TYPE_DECISION && is_decision_state_busy(*slot, task)) {
+                        SRV_DBG("the state is processed by a busy slot, defer task, id_task = %d\n", id_task);
                         queue_tasks.defer(std::move(task));
                         break;
                     }
@@ -4338,9 +4358,9 @@ private:
                     // make checkpoints only for completion and decision tasks
                     do_checkpoint = do_checkpoint && (slot.task->type == SERVER_TASK_TYPE_COMPLETION || slot.task->type == SERVER_TASK_TYPE_DECISION);
 
-                    // a decision only needs a checkpoint at the end of the prefix shared with its children
-                    const bool is_decision_parent = slot.task->type == SERVER_TASK_TYPE_DECISION && slot.task->n_tokens_shared > 0;
-                    do_checkpoint = do_checkpoint && (slot.task->type != SERVER_TASK_TYPE_DECISION || is_decision_parent);
+                    // a decision only needs a checkpoint at the end of its state
+                    const bool is_decision_ckpt = slot.task->type == SERVER_TASK_TYPE_DECISION && slot.task->n_tokens_ckpt > 0;
+                    do_checkpoint = do_checkpoint && (slot.task->type != SERVER_TASK_TYPE_DECISION || is_decision_ckpt);
 
                     // make a checkpoint of the parts of the memory that cannot be rolled back.
                     // checkpoints are created only if:
@@ -4409,6 +4429,12 @@ private:
 
                     const int32_t n_decision_first = slot.task->type == SERVER_TASK_TYPE_DECISION ? slot.task->decision.pos_first() : -1;
 
+                    // false if a task with the same state already made the checkpoint
+                    bool need_decision_ckpt = do_checkpoint && is_decision_ckpt;
+                    for (const auto & ckpt : slot.prompt.checkpoints) {
+                        need_decision_ckpt = need_decision_ckpt && ckpt->n_tokens != slot.task->n_tokens_ckpt;
+                    }
+
                     // add prompt tokens for processing in the current batch
                     while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
                         // get next token to process
@@ -4419,6 +4445,11 @@ private:
 
                         // stop at the end of the shared prefix, the children are started from this state
                         if (wait_shared && slot.prompt.n_tokens() == slot.task->n_tokens_shared) {
+                            break;
+                        }
+
+                        // stop at the end of the state, the checkpoint is made before the next batch
+                        if (need_decision_ckpt && slot.prompt.n_tokens() == slot.task->n_tokens_ckpt && batch.size() > n_tokens_prev) {
                             break;
                         }
 
@@ -4536,7 +4567,9 @@ private:
                             slot.prompt.checkpoints.empty() ||
                             is_last_user_message || near_prompt_end ||
                             n_tokens_start > slot.prompt.checkpoints.back()->n_tokens + params_base.checkpoint_min_step);
-                    do_checkpoint = do_checkpoint && (!is_decision_parent || n_tokens_start == slot.task->n_tokens_shared);
+                    if (is_decision_ckpt) {
+                        do_checkpoint = need_decision_ckpt && n_tokens_start == slot.task->n_tokens_ckpt && pos_min >= 0;
+                    }
                     SLT_DBG(slot, "main/do_checkpoint = %s, pos_min = %d, pos_max = %d\n", do_checkpoint ? "yes" : "no", pos_min, pos_max);
 
                     // note: we create the checkpoint before calling llama_decode(), so the current batch is not
@@ -6532,7 +6565,16 @@ void server_routes::init_routes() {
                 }
             }
             if (decision.can_share_prompt()) {
-                tasks = server_decision_group_tasks(std::move(tasks), params.n_parallel);
+                // the prompt of any other question starts with the same tokens, up to the end of the state
+                size_t n_tokens_state = 0;
+                if (!is_packed && files.empty() && !tasks.empty()) {
+                    server_decision_question other = questions[0];
+                    other.instructions = "#";
+                    server_task probe = server_task(SERVER_TASK_TYPE_DECISION);
+                    decision.fill_task(state, questions, other, 0, files, ctx_server.mctx, ctx_server.init_opt, probe);
+                    n_tokens_state = tasks[0].tokens.get_common_prefix(probe.tokens);
+                }
+                tasks = server_decision_group_tasks(std::move(tasks), params.n_parallel, n_tokens_state);
             }
             rd.post_tasks(std::move(tasks));
         }
