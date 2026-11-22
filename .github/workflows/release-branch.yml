@@ -2,29 +2,17 @@
 #   Windows x64 (Vulkan), Ubuntu x64 (Vulkan), macOS arm64 (Metal)
 # The jobs are the ones of release.yml, cut down to llama-server without the embedded UI.
 # release-publish.yml only runs for master, so the release is made here.
+# Runs when a tag decision-prefix-hold-* is pushed, the tag is the name of the release:
+#   git tag "decision-prefix-hold-b$(git rev-list --count HEAD)-$(git rev-parse --short=7 HEAD)"
+#   git push origin <tag>
+# A run by hand makes the same name from the branch.
 name: Release (decision-prefix-hold)
 
 on:
   workflow_dispatch: # allows manual triggering
   push:
-    branches:
-      - decision-prefix-hold
-    paths: [
-      '.github/workflows/release-branch.yml',
-      '**/CMakeLists.txt',
-      '**/.cmake',
-      '**/*.h',
-      '**/*.hpp',
-      '**/*.c',
-      '**/*.cpp',
-      '**/*.cu',
-      '**/*.cuh',
-      '**/*.swift',
-      '**/*.m',
-      '**/*.metal',
-      '**/*.comp',
-      '**/*.glsl'
-    ]
+    tags:
+      - 'decision-prefix-hold-*'
 
 cache-mode: write
 permissions:
@@ -46,7 +34,7 @@ jobs:
 
     outputs:
       should_release: ${{ steps.check.outputs.should_release }}
-      tag_name: ${{ steps.tag.outputs.name }}
+      tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.tag.outputs.name }}
 
     steps:
       - id: check
@@ -67,7 +55,7 @@ jobs:
           fetch-depth: 0
 
       - name: Determine tag name
-        if: ${{ steps.check.outputs.should_release == 'true' }}
+        if: ${{ steps.check.outputs.should_release == 'true' && github.ref_type != 'tag' }}
         id: tag
         uses: ./.github/actions/get-tag-name
 
