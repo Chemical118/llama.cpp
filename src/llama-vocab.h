@@ -161,6 +161,9 @@ struct llama_vocab {
     bool get_add_space_prefix          () const;
     bool get_add_bos                   () const;
     bool get_add_eos                   () const;
+
+    // reuse the tokens of the words that a text shares with the start of the previous one (BPE, see llm_tokenizer_bpe)
+    void set_tokenize_prefix_cache(bool enable) const;
     bool get_add_sep                   () const;
     bool get_dna_auto_tags             () const;
     bool get_ignore_merges             () const;

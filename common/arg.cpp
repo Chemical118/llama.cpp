@@ -1737,6 +1737,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_DECISION_PREFIX_CKPT").set_examples({LLAMA_EXAMPLE_SERVER}));
     add_opt(common_arg(
+        {"--decision-token-cache"},
+        "decision models: tokenize only the part of a prompt that differs from the previous one, the questions of a request "
+        "share the state (default: disabled)",
+        [](common_params & params) {
+            params.decision_token_cache = true;
+        }
+    ).set_env("LLAMA_ARG_DECISION_TOKEN_CACHE").set_examples({LLAMA_EXAMPLE_SERVER}));
+    add_opt(common_arg(
         {"--context-shift"},
         {"--no-context-shift"},
         string_format("whether to use context shift on infinite text generation (default: %s)", params.ctx_shift ? "enabled" : "disabled"),

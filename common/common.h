@@ -660,6 +660,7 @@ struct common_params {
     bool    cache_idle_slots    = true;  // save and clear idle slots upon starting a new task
     int32_t decision_pad        = -1;    // decision: tokens that one evaluation is worth when padding the questions of a request, -1 = no padding
     int32_t decision_prefix_ckpt = -1;   // decision: min tokens between the checkpoint where the state starts to differ and the previous one, -1 = no such checkpoint
+    bool    decision_token_cache = false; // decision: tokenize only the part of a prompt that differs from the previous one
     int32_t n_ctx_checkpoints   = 32;    // max number of context checkpoints per slot
     int32_t kv_unified_per_slot = 0;     // max context per parallel slot; 0 = unset
     int32_t checkpoint_min_step = 8192;  // minimum spacing between context checkpoints

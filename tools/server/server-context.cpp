@@ -1351,6 +1351,10 @@ private:
             return false;
         }
 
+        if (params_base.decision_token_cache) {
+            llama_vocab_set_tokenize_prefix_cache(vocab, true);
+        }
+
         n_ctx = llama_n_ctx(ctx_tgt);
 
         add_bos_token = llama_vocab_get_add_bos(vocab);

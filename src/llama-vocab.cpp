@@ -8,6 +8,7 @@
 #include "unicode.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cctype>
 #include <cfloat>
@@ -18,6 +19,7 @@
 #include <forward_list>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <string_view>
@@ -608,10 +610,27 @@ struct llm_tokenizer_bpe : llm_tokenizer {
                 };
                 break;
         }
+        prefix_cache_ok = vocab.get_pre_type() == LLAMA_VOCAB_PRE_TYPE_QWEN35;
     }
 
     std::vector<std::string> regex_exprs;
     bool byte_encode = true; // GPT-2 byte encoding; false for SPM-style BPE (raw UTF-8)
+
+    // Prefix cache (off unless enabled, see llama_vocab_set_tokenize_prefix_cache): the last text that was tokenized,
+    // its tokens and where its words end. A text that starts like the cached one takes the tokens of the words they
+    // share and only its rest is split and merged. A word is tokenized on its own, so the result is the same as
+    // long as the words of the shared part are the same. This holds for the splitters that scan a text from left to
+    // right and decide where a word ends from the text up to two codepoints after it (see prefix_cache_ok).
+    struct prefix_cache_data {
+        std::string                                text;
+        std::vector<llama_token>                   tokens;
+        std::vector<std::pair<uint32_t, uint32_t>> words; // end of each word: bytes of the text, tokens
+    };
+    mutable std::mutex        prefix_cache_mutex;
+    mutable prefix_cache_data prefix_cache;
+    mutable std::atomic<bool> prefix_cache_on{false};
+    // set for the pre-tokenizers whose splitter was checked to work that way (unicode_regex_split_custom_qwen35)
+    bool prefix_cache_ok = false;
 };
 
 struct llm_tokenizer_bpe_session {
@@ -657,6 +676,17 @@ struct llm_tokenizer_bpe_session {
     }
 
     virtual void tokenize(const std::string & text, std::vector<llama_token> & output) {
+        if (tokenizer.prefix_cache_ok && tokenizer.prefix_cache_on.load(std::memory_order_relaxed) &&
+                text.size() >= PREFIX_CACHE_MIN_TEXT && text.size() < UINT32_MAX && is_utf8(text)) {
+            if (tokenize_with_prefix_cache(text, output)) {
+                return;
+            }
+        }
+        tokenize_words(split_words(text), output);
+    }
+
+    // the words of a text, each is tokenized on its own
+    std::vector<std::string> split_words(const std::string & text) const {
         auto tok_pre = vocab.get_pre_type();
 
         std::vector<std::string> word_collection;
@@ -686,10 +716,6 @@ struct llm_tokenizer_bpe_session {
             word_collection = unicode_regex_split(text, tokenizer.regex_exprs, tokenizer.byte_encode);
         }
 
-        int final_prev_index = -1;
-
-        symbols_final.clear();
-
         if (tok_pre == LLAMA_VOCAB_PRE_TYPE_MMBERT) {
             // Metaspace pre-tokenizer: a text starts with an escaped space, and each escaped space starts a new word
             static const std::string space = "\xe2\x96\x81";
@@ -712,6 +738,16 @@ struct llm_tokenizer_bpe_session {
             }
             word_collection = std::move(words);
         }
+
+        return word_collection;
+    }
+
+    void tokenize_words(const std::vector<std::string> & word_collection, std::vector<llama_token> & output) {
+        auto tok_pre = vocab.get_pre_type();
+
+        int final_prev_index = -1;
+
+        symbols_final.clear();
 
         for (const auto & word : word_collection) {
             work_queue = llm_bigram_bpe::queue();
@@ -831,6 +867,129 @@ struct llm_tokenizer_bpe_session {
     }
 
 private:
+    // shorter texts are tokenized as usual
+    static constexpr size_t PREFIX_CACHE_MIN_TEXT = 256;
+    // a word of the cached text is reused when the two texts are the same up to this many bytes after it and after
+    // the whitespace that follows it (the splitter reads up to two codepoints further, and the texts can differ in
+    // the middle of a codepoint)
+    static constexpr size_t PREFIX_CACHE_MARGIN = 16;
+
+    // The bytes form codepoints (lead and continuation bytes only, as the splitter reads them). Other texts are
+    // tokenized as usual: the splitter replaces what it cannot read, and the words no longer add up to the text.
+    static bool is_utf8(const std::string & text) {
+        const size_t n = text.size();
+        for (size_t i = 0; i < n; ) {
+            const unsigned char c = (unsigned char) text[i];
+            const size_t len = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 0;
+            if (len == 0 || i + len > n) {
+                return false;
+            }
+            for (size_t j = 1; j < len; j++) {
+                if (((unsigned char) text[i + j] & 0xC0) != 0x80) {
+                    return false;
+                }
+            }
+            i += len;
+        }
+        return true;
+    }
+
+    // bytes of the text that a word covers
+    size_t word_n_bytes(const std::string & word) const {
+        if (!tokenizer.byte_encode) {
+            return word.size();
+        }
+        // byte encoded: one codepoint per byte of the text
+        size_t n = 0;
+        for (const char c : word) {
+            n += ((unsigned char) c & 0xC0) != 0x80;
+        }
+        return n;
+    }
+
+    // Returns false when the text was not tokenized here (its words do not add up to it).
+    bool tokenize_with_prefix_cache(const std::string & text, std::vector<llama_token> & output) {
+        std::vector<llama_token>                   tokens;
+        std::vector<std::pair<uint32_t, uint32_t>> words;
+        size_t n_reuse = 0; // bytes of the text covered by the reused words
+
+        {
+            std::lock_guard<std::mutex> lock(tokenizer.prefix_cache_mutex);
+            const auto & cache = tokenizer.prefix_cache;
+
+            const size_t n_max    = std::min(cache.text.size(), text.size());
+            const size_t n_common = std::mismatch(text.begin(), text.begin() + n_max, cache.text.begin()).first - text.begin();
+
+            if (n_common > PREFIX_CACHE_MARGIN) {
+                // first word that ends too close to where the texts differ
+                auto it = std::upper_bound(cache.words.begin(), cache.words.end(), n_common - PREFIX_CACHE_MARGIN,
+                        [](size_t pos, const std::pair<uint32_t, uint32_t> & word) { return pos < word.first; });
+                while (it != cache.words.begin()) {
+                    // the splitter also reads the whitespace that follows a word, up to the next other codepoint:
+                    // that one must be in the shared part as well
+                    size_t pos = (it - 1)->first;
+                    while (pos < n_common) {
+                        size_t next = pos;
+                        bool is_whitespace = false;
+                        try {
+                            is_whitespace = unicode_cpt_flags_from_cpt(unicode_cpt_from_utf8(text, next)).is_whitespace;
+                        } catch (const std::invalid_argument &) {
+                            // not a codepoint, the splitter reads it as a replacement character
+                        }
+                        if (!is_whitespace) {
+                            break;
+                        }
+                        pos = next;
+                    }
+                    if (pos + PREFIX_CACHE_MARGIN <= n_common) {
+                        n_reuse = (it - 1)->first;
+                        words.assign(cache.words.begin(), it);
+                        tokens.assign(cache.tokens.begin(), cache.tokens.begin() + (it - 1)->second);
+                        break;
+                    }
+                    --it;
+                }
+            }
+        }
+
+        size_t n_bytes = n_reuse;
+        {
+            const std::vector<std::string> rest = split_words(n_reuse > 0 ? text.substr(n_reuse) : text);
+            std::vector<std::string> one(1);
+            for (const auto & word : rest) {
+                one[0] = word;
+                tokenize_words(one, tokens);
+                n_bytes += word_n_bytes(word);
+                words.emplace_back((uint32_t) n_bytes, (uint32_t) tokens.size());
+            }
+        }
+        if (n_bytes != text.size()) {
+            return false;
+        }
+
+        if (getenv("LLAMA_TOKENIZE_PREFIX_CACHE_CHECK") != nullptr) {
+            // debug: compare with the tokens of the whole text
+            std::vector<llama_token> ref;
+            tokenize_words(split_words(text), ref);
+            if (ref != tokens) {
+                LLAMA_LOG_ERROR("%s: prefix cache mismatch (text of %zu bytes, %zu reused)\n", __func__, text.size(), n_reuse);
+                output.insert(output.end(), ref.begin(), ref.end());
+                return true;
+            }
+        }
+
+        output.insert(output.end(), tokens.begin(), tokens.end());
+
+        {
+            std::lock_guard<std::mutex> lock(tokenizer.prefix_cache_mutex);
+            auto & cache = tokenizer.prefix_cache;
+            cache.text   = text;
+            cache.tokens = std::move(tokens);
+            cache.words  = std::move(words);
+        }
+        return true;
+    }
+
     void add_new_bigram(int left, int right) {
         if (left == -1 || right == -1) {
             return;
@@ -4572,6 +4731,12 @@ bool llama_vocab::get_add_eos() const {
     return pimpl->add_eos;
 }
 
+void llama_vocab::set_tokenize_prefix_cache(bool enable) const {
+    if (get_type() == LLAMA_VOCAB_TYPE_BPE && pimpl->tokenizer) {
+        static_cast<const llm_tokenizer_bpe *>(pimpl->tokenizer.get())->prefix_cache_on.store(enable);
+    }
+}
+
 bool llama_vocab::get_add_sep() const {
     return pimpl->add_sep;
 }
@@ -4774,6 +4939,10 @@ bool llama_vocab_get_add_bos(const struct llama_vocab * vocab) {
 
 bool llama_vocab_get_add_eos(const struct llama_vocab * vocab) {
     return vocab->get_add_eos();
+}
+
+void llama_vocab_set_tokenize_prefix_cache(const struct llama_vocab * vocab, bool enable) {
+    vocab->set_tokenize_prefix_cache(enable);
 }
 
 bool llama_vocab_get_add_sep(const struct llama_vocab * vocab) {

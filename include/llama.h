@@ -1278,6 +1278,11 @@ extern "C" {
     LLAMA_API bool llama_vocab_get_add_eos(const struct llama_vocab * vocab);
     LLAMA_API bool llama_vocab_get_add_sep(const struct llama_vocab * vocab);
 
+    // Let the tokenizer reuse the tokens of the words that a text shares with the start of the text tokenized before it.
+    // The tokens do not change. For prompts that repeat a long prefix. Off by default, has no effect on the tokenizers
+    // that do not support it.
+    LLAMA_API void llama_vocab_set_tokenize_prefix_cache(const struct llama_vocab * vocab, bool enable);
+
     // model-specific suppress tokens (gguf key: tokenizer.ggml.suppress_tokens)
     LLAMA_API const llama_token * llama_vocab_get_suppress_tokens(const struct llama_vocab * vocab, int32_t * n_suppress_tokens);
 

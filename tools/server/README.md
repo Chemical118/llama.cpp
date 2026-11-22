@@ -170,6 +170,7 @@ For the full list of features, please refer to [server's changelog](https://gith
 | `-kvu, --kv-unified, -no-kvu, --no-kv-unified` | use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)<br/>(env: LLAMA_ARG_KV_UNIFIED) |
 | `--decision-pad N` | decision models: pad the questions of a request to the same length when this takes fewer evaluations, one evaluation is worth N pad tokens (default: -1, -1 = disabled)<br/>(env: LLAMA_ARG_DECISION_PAD) |
 | `--decision-prefix-ckpt N` | decision models: also make a checkpoint where the state starts to differ from the previous one, so the next state is evaluated from there, if it is at least N tokens after the checkpoint in use (default: -1, -1 = disabled)<br/>(env: LLAMA_ARG_DECISION_PREFIX_CKPT) |
+| `--decision-token-cache` | decision models: tokenize only the part of a prompt that differs from the previous one, the questions of a request share the state (default: disabled)<br/>(env: LLAMA_ARG_DECISION_TOKEN_CACHE) |
 | `--cache-idle-slots, --no-cache-idle-slots` | save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram)<br/>(env: LLAMA_ARG_CACHE_IDLE_SLOTS) |
 | `--context-shift, --no-context-shift` | whether to use context shift on infinite text generation (default: disabled)<br/>(env: LLAMA_ARG_CONTEXT_SHIFT) |
 | `-r, --reverse-prompt PROMPT` | halt generation at PROMPT, return control in interactive mode |
