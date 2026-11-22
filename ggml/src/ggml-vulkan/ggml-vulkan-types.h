@@ -1075,6 +1075,7 @@ struct vk_device_struct {
     bool disable_graph_optimize;
     bool xe_fa_support {};
     bool disable_narrow_mul_mat;
+    uint32_t mul_mat_cm2_max_tile_n;
 
     std::unique_ptr<vk_memory_logger> memory_logger;
 

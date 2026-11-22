@@ -3207,7 +3207,13 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
 
     // Set up tile selector functions
     if (device->coopmat2) {
-        device->matmul_tile_selector = [](uint32_t m, uint32_t n, uint32_t /*k*/, uint32_t shader_core_count,
+        // GGML_VK_MUL_MAT_CM2_MAX_TILE_N: step down to a config that is not wider
+        const uint32_t max_tile_n = device->mul_mat_cm2_max_tile_n;
+        auto const cap_tile = [max_tile_n](uint32_t i, const std::vector<vk_matmul_pipeline_pair>& configs) -> uint32_t {
+            while (i > 0 && configs[i].unaligned->wg_denoms[1] > max_tile_n) --i;
+            return i;
+        };
+        device->matmul_tile_selector = [cap_tile](uint32_t m, uint32_t n, uint32_t /*k*/, uint32_t shader_core_count,
                                           const std::vector<vk_matmul_pipeline_pair>& configs) -> uint32_t {
             if (configs.size() <= 1) return 0;
             for (uint32_t i = 0; i < configs.size(); ++i) {
@@ -3218,7 +3224,7 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             if (last == 0) return 0;
             if (last == 1) {
                 uint32_t crossover = configs[0].unaligned->wg_denoms[1];
-                return (n > crossover) ? 1 : 0;
+                return (n > crossover) ? cap_tile(1, configs) : 0;
             }
             // 3+ configs: s=0, m=1, l=2
             const uint32_t tiles_l = CEIL_DIV(m, configs[last].unaligned->wg_denoms[0]) * CEIL_DIV(n, configs[last].unaligned->wg_denoms[1]);
@@ -3226,24 +3232,24 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
             uint32_t crossover_large = configs[1].unaligned->wg_denoms[1];
             bool prefer_large = tiles_m > shader_core_count || tiles_l > shader_core_count ||
                                 (tiles_l <= shader_core_count / 3 && tiles_m > shader_core_count / 2);
-            if (n > crossover_large && prefer_large) return last;
+            if (n > crossover_large && prefer_large) return cap_tile(last, configs);
             uint32_t crossover_medium_m = configs[0].unaligned->wg_denoms[0];
             uint32_t crossover_medium_n = configs[0].unaligned->wg_denoms[1];
-            if (m > crossover_medium_m && n > crossover_medium_n) return 1;
+            if (m > crossover_medium_m && n > crossover_medium_n) return cap_tile(1, configs);
             return 0;
         };
-        device->matmul_id_tile_selector = [](uint32_t /*m*/, uint32_t n, uint32_t /*k*/, uint32_t /*shader_core_count*/,
+        device->matmul_id_tile_selector = [cap_tile](uint32_t /*m*/, uint32_t n, uint32_t /*k*/, uint32_t /*shader_core_count*/,
                                              const std::vector<vk_matmul_pipeline_pair>& configs) -> uint32_t {
             if (configs.size() <= 1) return 0;
             uint32_t last = (uint32_t)configs.size() - 1;
             if (configs.size() == 2) {
                 uint32_t crossover = configs[0].unaligned->wg_denoms[1];
-                return (n > crossover) ? 1 : 0;
+                return (n > crossover) ? cap_tile(1, configs) : 0;
             }
             uint32_t crossover_large = configs[1].unaligned->wg_denoms[1];
-            if (n > crossover_large) return last;
+            if (n > crossover_large) return cap_tile(last, configs);
             uint32_t crossover_medium = configs[0].unaligned->wg_denoms[1];
-            if (n > crossover_medium) return 1;
+            if (n > crossover_medium) return cap_tile(1, configs);
             return 0;
         };
     } else {
@@ -4621,6 +4627,13 @@ vk_device ggml_vk_get_device(size_t idx) {
         const char* GGML_VK_DISABLE_GRAPH_OPTIMIZE = getenv("GGML_VK_DISABLE_GRAPH_OPTIMIZE");
         device->disable_graph_optimize = GGML_VK_DISABLE_GRAPH_OPTIMIZE != nullptr;
         device->disable_narrow_mul_mat = getenv("GGML_VK_DISABLE_NARROW_MUL_MAT") != nullptr;
+
+        // widest tile (columns) of the coopmat2 mul_mat, the driver keeps device memory for the tiles that do not fit its shared memory
+        device->mul_mat_cm2_max_tile_n = UINT32_MAX;
+        const char* GGML_VK_MUL_MAT_CM2_MAX_TILE_N = getenv("GGML_VK_MUL_MAT_CM2_MAX_TILE_N");
+        if (GGML_VK_MUL_MAT_CM2_MAX_TILE_N != nullptr) {
+            device->mul_mat_cm2_max_tile_n = std::max<uint32_t>(std::stoul(GGML_VK_MUL_MAT_CM2_MAX_TILE_N), 1u);
+        }
 
         bool fp16_storage = false;
         bool fp16_compute = false;
