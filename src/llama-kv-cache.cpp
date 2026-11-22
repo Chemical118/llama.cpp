@@ -865,7 +865,50 @@ bool llama_kv_cache::update(llama_context * lctx, bool do_shift, const stream_co
 
         const size_t n_copy = sc_info.ssrc.size();
 
-        for (size_t i = 0; i < n_copy; ++i) {
+        // The copies are independent when no stream that is written is read or written by another copy, which is
+        // the case when one sequence is forked into several. The tensors of all layers can then go to the backend as
+        // one batch, instead of one synchronous copy per tensor.
+        bool independent = true;
+        for (size_t i = 0; i < n_copy && independent; ++i) {
+            for (size_t j = 0; j < n_copy; ++j) {
+                if (j != i && (sc_info.sdst[i] == sc_info.ssrc[j] || sc_info.sdst[i] == sc_info.sdst[j])) {
+                    independent = false;
+                    break;
+                }
+            }
+        }
+
+        if (independent) {
+            std::vector<const ggml_tensor *> srcs;
+            std::vector<ggml_tensor *>       dsts;
+            srcs.reserve(n_copy * layers.size() * 2);
+            dsts.reserve(n_copy * layers.size() * 2);
+
+            for (size_t i = 0; i < n_copy; ++i) {
+                const auto ssrc = sc_info.ssrc[i];
+                const auto sdst = sc_info.sdst[i];
+
+                assert(ssrc < n_stream);
+                assert(sdst < n_stream);
+                assert(ssrc != sdst);
+
+                LLAMA_LOG_DEBUG("%s: copying KV buffer: stream %d to stream %d\n", __func__, ssrc, sdst);
+
+                for (const auto & layer : layers) {
+                    srcs.push_back(layer.k_stream[ssrc]);
+                    dsts.push_back(layer.k_stream[sdst]);
+
+                    if (layer.v_stream[ssrc]) {
+                        srcs.push_back(layer.v_stream[ssrc]);
+                        dsts.push_back(layer.v_stream[sdst]);
+                    }
+                }
+            }
+
+            ggml_backend_tensor_copy_n(srcs.data(), dsts.data(), srcs.size());
+        }
+
+        for (size_t i = 0; i < n_copy && !independent; ++i) {
             const auto ssrc = sc_info.ssrc[i];
             const auto sdst = sc_info.sdst[i];
 
