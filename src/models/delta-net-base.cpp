@@ -65,13 +65,33 @@ ggml_tensor * llm_build_delta_net_base::build_conv_state(
     conv_states = ggml_reshape_3d(ctx0, conv_states, conv_kernel_size - 1, conv_channels, n_seqs);
     cb(conv_states, "conv_states_reshaped", il);
 
+    // [channels, n_seq_tokens, n_seqs]
+    ggml_tensor * x = qkv_mixed;
+
     qkv_mixed = ggml_transpose(ctx0, qkv_mixed);
     cb(qkv_mixed, "qkv_mixed_transposed", il);
 
     ggml_tensor * conv_input = ggml_concat(ctx0, conv_states, qkv_mixed, 0);
     cb(conv_input, "conv_input", il);
 
-    build_conv_state_store(inp, conv_states_all, conv_input, conv_kernel_size - 1, 0);
+    const int64_t n_cols       = conv_kernel_size - 1;
+    const int64_t n_seq_tokens = x->ne[1];
+
+    if (cparams.n_rs_seq == 0 && n_seq_tokens >= n_cols) {
+        // the new state is the last n_cols tokens of the input. Taking them from the input leaves the convolution
+        // as the only reader of conv_input, so a backend can fuse the two and skip writing the concat.
+        ggml_tensor * last = ggml_view_3d(ctx0, x, conv_channels, n_cols, n_seqs,
+                x->nb[1], x->nb[2], (n_seq_tokens - n_cols) * x->nb[1]);
+        last = ggml_transpose(ctx0, last); // [n_cols, channels, n_seqs]
+
+        const size_t row_size = conv_states_all->nb[1];
+        ggml_tensor * cell = ggml_view_2d(ctx0, conv_states_all, n_cols * conv_channels, n_seqs,
+                row_size, inp->mctx->get_head() * row_size);
+
+        ggml_build_forward_expand(gf, ggml_cpy(ctx0, last, cell));
+    } else {
+        build_conv_state_store(inp, conv_states_all, conv_input, n_cols, 0);
+    }
 
     return conv_input;
 }

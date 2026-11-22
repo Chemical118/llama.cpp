@@ -280,6 +280,11 @@ ggml_tensor * llama_model_qwen35::graph::build_norm_gated(
     ggml_tensor * normalized = build_norm(input, weights, nullptr, LLM_NORM_RMS, layer);
     ggml_tensor * gated_silu = ggml_silu(ctx0, gate);
 
+    if (!ggml_are_same_shape(normalized, gated_silu)) {
+        // same elements in the layout of the gate
+        normalized = ggml_reshape(ctx0, normalized, gated_silu);
+    }
+
     return ggml_mul(ctx0, normalized, gated_silu);
 }
 
@@ -473,12 +478,10 @@ ggml_tensor * llama_model_qwen35::graph::build_layer_attn_linear(
 
     ggml_tensor * output = build_recurrent_attn(inp, ssm_states_all, q_conv, k_conv, v_conv, gate, beta, state, il);
 
-    // z: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * n_tokens * n_seqs, head_dim]
-    ggml_tensor * z_2d = ggml_view_4d(ctx0, z, head_v_dim, num_v_heads, n_seq_tokens, n_seqs,
-            ggml_row_size(z->type, head_v_dim), z->nb[1], z->nb[1] * n_seq_tokens, 0);
-
     // Apply gated normalization: self.norm(core_attn_out, z)
-    ggml_tensor * attn_out_norm = build_norm_gated(output, model.layers[il].ssm_norm, z_2d, il);
+    // z stays [n_heads * head_dim, n_tokens * n_seqs]: its rows are contiguous, also when it is a part of the
+    // qkvz projection, which lets the backends fuse silu(z) with the multiplication
+    ggml_tensor * attn_out_norm = build_norm_gated(output, model.layers[il].ssm_norm, z, il);
 
     // Final reshape: [head_dim, n_heads, n_tokens, n_seqs] -> [n_heads * head_dim , n_tokens * n_seqs ]
     ggml_tensor * final_output = ggml_reshape_2d(ctx0, attn_out_norm, head_v_dim * num_v_heads, n_seq_tokens * n_seqs);
