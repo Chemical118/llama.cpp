@@ -811,6 +811,16 @@ struct vk_op_ssm_conv_push_constants {
     uint32_t nc, ncs, nr, n_t, n_s;
 };
 
+// offsets and strides in elements
+struct vk_op_ssm_conv_concat_push_constants {
+    uint32_t st_off, st_nb1, st_nb2;
+    uint32_t x_off, x_nb0, x_nb1, x_nb2;
+    uint32_t k_off, k_nb1;
+    uint32_t b_off;
+    uint32_t d_off, d_nb1, d_nb2;
+    uint32_t nc, ncs, nr, n_t, n_s;
+};
+
 struct vk_op_conv2d_push_constants {
     uint32_t Cout;
     uint32_t Cin;

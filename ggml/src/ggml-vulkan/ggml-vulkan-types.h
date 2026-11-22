@@ -672,6 +672,7 @@ enum rms_norm_mode {
     RMS_NORM_MUL_ROPE,
     RMS_NORM_MUL_ROPE_VIEW_SET_ROWS,
     RMS_NORM_VIEW_SET_ROWS,
+    RMS_NORM_SCALE,
     RMS_NORM_COUNT,
 };
 
@@ -1015,6 +1016,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_lightning_indexer_f32[GGML_TYPE_COUNT];
     // [size_idx][kda] where size_idx: 0=d16, 1=d32, 2=d64, 3=d128
     vk_pipeline pipeline_gated_delta_net[4][2];
+    vk_pipeline pipeline_gated_delta_net_wide[2]; // S_v = 128 with more columns per invocation, for many (seq, head) pairs
+    uint32_t gdn_wide_min_pairs = 64; // (seq, head) pairs from which the wide variant is used
     vk_pipeline pipeline_gated_delta_net_cm;
     vk_pipeline pipeline_gated_delta_net_cm_v32;
     vk_pipeline pipeline_gated_delta_net_cm_v128;
@@ -1023,6 +1026,8 @@ struct vk_device_struct {
     vk_pipeline pipeline_ssm_conv_f32;
     vk_pipeline pipeline_ssm_conv_silu_f32;
     vk_pipeline pipeline_ssm_conv_bias_silu_f32;
+    // concat(state, x) + ssm_conv, then nothing / silu / bias and silu
+    vk_pipeline pipeline_ssm_conv_concat_f32[3];
     vk_pipeline pipeline_opt_step_adamw_f32;
     vk_pipeline pipeline_opt_step_sgd_f32;
     std::map<vk_conv2d_pipeline_state, vk_pipeline> pipeline_conv2d_f32[CONV_SHAPE_COUNT];

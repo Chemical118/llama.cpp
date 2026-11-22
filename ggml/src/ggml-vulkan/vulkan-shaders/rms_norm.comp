@@ -182,7 +182,17 @@ void rms_norm(uint num_iters) {
                     if (col >= ncols) {
                         continue;
                     }
+#if RMS_NORM_ADD_FUSION || RMS_NORM_SET_ROWS_FUSION
                     data_d[d_offset + col] = FLOAT_TO_D(scale * FLOAT_TYPE(A_TO_FLOAT(data_a[a_offset + col])));
+#else
+                    // param2: factor of a fused scale that follows the norm (0 = none). It is applied to the
+                    // normalized value, as the separate scale would, so the result does not change.
+                    FLOAT_TYPE value = scale * FLOAT_TYPE(A_TO_FLOAT(data_a[a_offset + col]));
+                    if (p.param2 != 0.0f) {
+                        value = value * FLOAT_TYPE(p.param2);
+                    }
+                    data_d[d_offset + col] = FLOAT_TO_D(value);
+#endif
                 }
             }
 #endif
